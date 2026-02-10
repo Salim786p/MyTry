@@ -1,0 +1,21 @@
+# Dependency directories
+node_modules/
+
+# Local Environment Variables (CRITICAL: Do not upload your API keys)
+.env
+
+# SQLite Database
+linkvault.db
+linkvault.db-journal
+
+# Uploads folder (if you want to keep local test uploads off GitHub)
+uploads/
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS related files
+.DS_Store
+Thumbs.db
