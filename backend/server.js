@@ -1,3 +1,5 @@
+// Add this line with other requires
+const { validateUpload, validateShareId, DANGEROUS_EXTENSIONS } = require('./validation');
 const express = require('express');
 const cors = require('cors');
 const Database = require('better-sqlite3');
@@ -79,7 +81,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // 2. Upload text
-app.post('/api/upload/text', (req, res) => {
+app.post('/api/upload/text', validateUpload, async (req, res) => {
   try {
     const { content, expiry = '10m' } = req.body;
     
@@ -112,7 +114,7 @@ app.post('/api/upload/text', (req, res) => {
 });
 
 // 3. Upload file to Cloudinary
-app.post('/api/upload/file', upload.single('file'), async (req, res) => {
+app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'File is required' });
@@ -170,15 +172,15 @@ app.post('/api/upload/file', upload.single('file'), async (req, res) => {
 });
 
 // 4. Get content by ID
-app.get('/api/share/:id', (req, res) => {
+app.get('/api/share/:id', validateShareId, async (req, res) => { 
   try {
     const { id } = req.params;
     
     const stmt = db.prepare('SELECT * FROM shares WHERE id = ?');
     const share = stmt.get(id);
-    
+
     if (!share) {
-      return res.status(404).json({ error: 'Link not found' });
+    return res.status(403).json({ error: 'Access denied' }); 
     }
     
     // Check expiry
@@ -219,7 +221,7 @@ app.get('/api/share/:id', (req, res) => {
 });
 
 // 5. Download file (redirects to Cloudinary)
-app.get('/api/download/:id', (req, res) => {
+app.get('/api/download/:id', validateShareId, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -228,9 +230,9 @@ app.get('/api/download/:id', (req, res) => {
       FROM shares WHERE id = ?
     `);
     const share = stmt.get(id);
-    
+
     if (!share || share.type !== 'file') {
-      return res.status(404).json({ error: 'File not found' });
+      return res.status(403).json({ error: 'Access denied' });
     }
     
     // Check expiry
