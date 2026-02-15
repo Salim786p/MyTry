@@ -124,12 +124,25 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
     const id = generateId();
     const expiresAt = getExpiryDate(expiry);
     
-    // Upload to Cloudinary
-    const result = await cloudinary.uploader.upload(req.file.path, {
+    // Determine resource type based on file extension
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+    const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
+    const isImage = imageExtensions.includes(fileExt);
+    
+    // Upload to Cloudinary with correct resource type
+    const uploadOptions = {
       folder: 'linkvault',
-      resource_type: 'auto',
-      public_id: `${id}_${Date.now()}`
-    });
+      public_id: `${id}_${Date.now()}`,
+      resource_type: isImage ? 'image' : 'raw'
+    };
+    
+    const result = await cloudinary.uploader.upload(req.file.path, uploadOptions);
+    
+    // For raw files (PDFs, docs, etc.), use raw URL format
+    let fileUrl = result.secure_url;
+    if (!isImage) {
+      fileUrl = result.secure_url.replace('/image/upload/', '/raw/upload/');
+    }
     
     // Remove temp file
     fs.unlinkSync(req.file.path);
@@ -143,7 +156,7 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
     stmt.run(
       id,
       'file',
-      result.secure_url,
+      fileUrl,  // ← Corrected URL
       result.public_id,
       req.file.originalname,
       req.file.size,
@@ -158,7 +171,7 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
       type: 'file',
       fileName: req.file.originalname,
       fileSize: req.file.size,
-      cloudinaryUrl: result.secure_url
+      cloudinaryUrl: fileUrl  // ← Return corrected URL
     });
     
   } catch (error) {
@@ -220,13 +233,13 @@ app.get('/api/share/:id', validateShareId, async (req, res) => {
   }
 });
 
-// 5. Download file (redirects to Cloudinary)
+// 5. Download file with proper headers
 app.get('/api/download/:id', validateShareId, async (req, res) => {
   try {
     const { id } = req.params;
     
     const stmt = db.prepare(`
-      SELECT cloudinary_url, expires_at, type 
+      SELECT cloudinary_url, expires_at, type, original_name 
       FROM shares WHERE id = ?
     `);
     const share = stmt.get(id);
@@ -240,12 +253,27 @@ app.get('/api/download/:id', validateShareId, async (req, res) => {
       return res.status(410).json({ error: 'Link has expired' });
     }
     
-    // Redirect to Cloudinary URL
-    res.redirect(share.cloudinary_url);
+    // Fetch file from Cloudinary
+    const response = await fetch(share.cloudinary_url);
+    
+    if (!response.ok) {
+      throw new Error('Failed to fetch file from storage');
+    }
+    
+    // Get file buffer
+    const buffer = Buffer.from(await response.arrayBuffer());
+    
+    // Set proper headers for download
+    res.setHeader('Content-Disposition', `attachment; filename="${share.original_name}"`);
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
+    res.setHeader('Content-Length', buffer.length);
+    
+    // Send file
+    res.send(buffer);
     
   } catch (error) {
     console.error('Download error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Download failed: ' + error.message });
   }
 });
 
