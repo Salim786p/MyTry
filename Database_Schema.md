@@ -28,6 +28,24 @@ This is the only table in the database. It stores all uploaded content - both te
 | `max_downloads` | INTEGER | Optional: maximum number of times file can be downloaded |
 | `current_downloads` | INTEGER | Counter for how many times file has been downloaded |
 | `password` | TEXT | Optional: password to protect the content |
+| `owner_id` | TEXT | Optional: `users.id` of the uploader (allows ownership and user records) |
+
+## Users Table
+
+The project also includes a simple `users` table to support registration and login:
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `id` | TEXT (PRIMARY KEY) | Unique user id (nanoid) |
+| `email` | TEXT UNIQUE | User email (validated format) |
+| `password` | TEXT | Hashed password (stored using bcrypt) |
+| `created_at` | DATETIME | Account creation timestamp |
+
+## Notes on data & security
+
+- `owner_id` links a share to the uploader (if present) so owners can list and delete their active shares via the `GET /user/shares` and `DELETE /share/:id` endpoints.
+- User passwords are hashed with bcrypt (not stored in plaintext).
+- Share-level passwords (the optional per-share protection) are stored in the `password` column in this prototype; for stronger protection you may want to hash them as well.
 
 ## Example Records
 

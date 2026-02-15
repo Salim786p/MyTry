@@ -1,0 +1,40 @@
+%% Data flow for LinkVault
+
+flowchart TB
+  %% Define beautiful, readable color classes
+  classDef userFill fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#000000
+  classDef frontFill fill:#bbdefb,stroke:#1976d2,stroke-width:2px,color:#000000
+  classDef backFill fill:#e1bee7,stroke:#8e24aa,stroke-width:2px,color:#000000
+  classDef dbFill fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#000000
+  classDef cloudFill fill:#ffe082,stroke:#ffa000,stroke-width:2px,color:#000000
+  classDef logicFill fill:#ffccbc,stroke:#d84315,stroke-width:2px,color:#000000
+
+  A[User Browser]:::userFill -->|Upload text/file| B(Frontend React App):::frontFill
+  B -->|POST /api/upload| C[Backend Express Server]:::backFill
+
+  C --> D{Upload Type}:::logicFill
+  D -->|File| E[Cloudinary Storage]:::cloudFill
+  D -->|Text| F["SQLite: store text metadata"]:::dbFill
+
+  E -->|returns URL & public_id| G["SQLite: store file metadata"]:::dbFill
+  G --> H[Success response -> Frontend displays link]:::logicFill
+  F --> H
+
+  %% Share access flow
+  A -->|Open share link| I[Frontend Share Page]:::frontFill
+  I -->|GET /api/share/id| C
+  C -->|if protected| J["POST /api/share/id/verify"]:::backFill
+  C -->|if file download| K["GET /api/download/id"]:::backFill
+
+  %% Auth flow
+  A -->|Register / Login| B
+  B -->|"POST /api/auth/register or /auth/login"| C
+  C --> L["users table (SQLite)"]:::dbFill
+  L -->|returns JWT| B
+
+  %% Owner management
+  B -->|Authenticated requests include JWT| C
+  C -->|owner_id set on uploads| G
+  C -->|owner_id set on uploads| F
+  B -->|GET /api/user/shares| C
+  C --> M[Return active shares for user]:::logicFill

@@ -1,17 +1,14 @@
 # LinkVault
 
-## A Secure File and Text Sharing Application
+## Secure File & Text Sharing — Updated
 
-### Full Stack Development Project
+This repository contains LinkVault — a small, self-hosted secure sharing app that lets users upload text or files and share short-lived links. The project now includes optional user accounts (registration/login), ownership of uploads, and a "My Records" view for logged-in users.
 
-**February 15, 2026**
+Last updated: February 15, 2026
 
-**Tech Stack:**\
-React + Vite + Tailwind --- Node.js + Express --- SQLite + Cloudinary
+Tech Stack: React + Vite + Tailwind CSS — Node.js + Express — SQLite + Cloudinary
 
-------------------------------------------------------------------------
-
-# Setup Instructions
+## Setup Instructions
 
 ## Prerequisites
 
@@ -83,165 +80,24 @@ npm run dev
 
 ------------------------------------------------------------------------
 
-# API Overview
+## API Overview
 
-**Base URL:** `http://localhost:5000/api`
+Base URL: `http://localhost:5000/api`
 
-------------------------------------------------------------------------
-
-## Health Check
-
-``` http
-GET /health
-```
-
-Response:
-
-``` json
-{
-  "status": "OK",
-  "database": "SQLite",
-  "storage": "Cloudinary"
-}
-```
+- `POST /auth/register` — Register a user. Body: `{ email, password }`. Email format validated and duplicates rejected.
+- `POST /auth/login` — Login. Body: `{ email, password }`. Returns JWT token (7d).
+- `POST /upload/text` — Upload text. Optional auth; include `Authorization: Bearer <token>` to attach ownership.
+- `POST /upload/file` — Upload file (multipart/form-data). Optional auth.
+- `POST /share/:id/verify` — Verify content password (if set).
+- `GET /share/:id` — Get share metadata and content (respects expiry and view limits).
+- `GET /download/:id` — Download file (respects download limits and expiry).
+- `DELETE /share/:id` — Delete a share (requires authentication; only owner).
+- `GET /user/shares` — (Authenticated) list of active shares owned by the user.
+- `GET /cleanup` — Manual trigger for cleanup (also runs hourly via cron job).
 
 ------------------------------------------------------------------------
 
-## Upload Text
-
-``` http
-POST /upload/text
-Content-Type: application/json
-```
-
-``` json
-{
-  "content": "Your text here",
-  "expiry": "10m",
-  "maxViews": 5,
-  "password": "secret123"
-}
-```
-
-Expiry options: `10m`, `1h`, `1d`, `7d`
-Default expiry: `10m`
-
-------------------------------------------------------------------------
-
-## Upload File
-
-``` http
-POST /upload/file
-Content-Type: multipart/form-data
-```
-
-FormData:
-
--   file: (binary file)
--   expiry: "10m"
--   maxViews: 5 (optional)
--   maxDownloads: 3 (optional)
--   password: "secret123"
-
-------------------------------------------------------------------------
-
-## Verify Password
-
-``` http
-POST /share/:id/verify
-Content-Type: application/json
-```
-
-``` json
-{
-  "password": "user_input"
-}
-```
-
-Responses:
-
--   Protected & correct:
-
-``` json
-{
-  "protected": true,
-  "verified": true
-}
-```
-
--   Not protected:
-
-``` json
-{
-  "protected": false
-}
-```
-
--   Wrong password:
-
-``` json
-{
-  "protected": true,
-  "verified": false
-}
-```
-
-HTTP Status: `401`
-
-------------------------------------------------------------------------
-
-## Get Content
-
-``` http
-GET /share/:id
-```
-
-### Text Response
-
-``` json
-{
-  "type": "text",
-  "content": "...",
-  "expiresAt": "...",
-  "isProtected": false
-}
-```
-
-### File Response
-
-``` json
-{
-  "type": "file",
-  "fileName": "document.pdf",
-  "fileSize": 1048576,
-  "downloadUrl": "...",
-  "expiresAt": "..."
-}
-```
-
-------------------------------------------------------------------------
-
-## Download File
-
-``` http
-GET /download/:id
-```
-
-Returns file with original filename preserved.
-
-------------------------------------------------------------------------
-
-## Manual Cleanup
-
-``` http
-GET /cleanup
-```
-
-Triggers deletion of expired content.
-
-------------------------------------------------------------------------
-
-# Design Decisions
+## Design Decisions
 
 ## SQLite over MongoDB
 
@@ -287,18 +143,22 @@ IP for share/download endpoints.
 Blocks dangerous extensions: `.exe`, `.bat`, `.sh`, `.js`, `.jar`,
 `.php`. Only safe files allowed.
 
+## User Accounts & "My Records"
+
+Authentication is optional: users can register and log in to the app. When authenticated, uploads are recorded with an `owner_id` and the frontend exposes a **My Records** view where the user can see their active (non-expired) uploads and delete them. Share pages remain guest-first (visiting a link does not auto-apply your session) to avoid accidental management access when opening shared links.
+
 ------------------------------------------------------------------------
 
-# Assumptions and Limitations
+## Assumptions and Limitations
 
 ## Assumptions
 
 1.  Links are shared responsibly - anyone with the link can access
-    content
+	content
 2.  Filenames are safe - dangerous extensions blocked but filenames
-    assumed non-malicious
+	assumed non-malicious
 3.  10-character IDs are sufficient - 58 possible characters
-    (A-Za-z0-9-) gives 4.3 quadrillion combinations
+	(A-Za-z0-9-) gives 4.3 quadrillion combinations
 4.  10-minute default expiry works - users can change it if needed
 5.  Passwords are case-sensitive - "Secret123" ≠ "secret123".
 
@@ -306,20 +166,11 @@ Blocks dangerous extensions: `.exe`, `.bat`, `.sh`, `.js`, `.jar`,
 
 ## Limitations
 
-1.  No user accounts - cannot track uploads or manage content.
-2.  100MB file size limit - due to Cloudinary free tier and server
-    considerations.
-3.  Cloudinary dependency - if Cloudinary fails, downloads fail.
-4.  SQLite not for scale - concurrent writes become bottleneck.
-5.  No HTTPS locally - production would require SSL.
-6.  Passwords stored in plaintext - in production would hash with
-    bcrypt.
-7.  Basic rate limiting - IP-based limits only.
+This project is designed as a functional prototype and has a few deliberate constraints:
+
+* **Storage & Upload Limits:** File uploads are capped at 100MB and rely entirely on Cloudinary availability. Executable files are blocked for security, and text snippets are limited to 10,000 characters.
+* **Security & Auth:** The authentication system is minimal (no email verification, no password resets, single-session only). While user passwords use `bcrypt`, *share-level* passwords are currently stored in plaintext. 
+* **Scalability:** SQLite and IP-based rate-limiting are used for simplicity. This is not designed for high write-concurrency, and extreme simultaneous access may cause view/download counters to be off by ±1.
+* **Background Tasks & UI:** Expired content is purged via an hourly background cron job, meaning deletion is not strictly instantaneous. Additionally, the user dashboard currently lacks search or filtering features.
 
 ------------------------------------------------------------------------
-
-# What's Not Included
-
--   User authentication
--   Custom URL slugs
--   Bulk upload
