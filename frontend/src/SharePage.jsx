@@ -5,6 +5,8 @@ import { FileText, Download, Copy, Clock, AlertCircle, Home, Shield, Eye, Downlo
 function SharePage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  // Do not auto-apply stored token when visiting a share link.
+  // Users must explicitly sign in from the main site to manage/delete their own shares.
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -23,13 +25,14 @@ function SharePage() {
   useEffect(() => {
     const checkPassword = async () => {
       try {
+        // Do not include Authorization header unless the user has explicitly chosen to sign-in on this page.
         const response = await fetch(`http://localhost:5000/api/share/${id}/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: '' })
-        });
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: '' })
+            });
         const data = await response.json();
-        
+
         if (data.protected && !data.verified) {
           setRequiresPassword(true);
           setLoading(false);
@@ -49,6 +52,7 @@ function SharePage() {
   const loadContent = async () => {
     setLoading(true);
     try {
+      // Do not send Authorization header by default when viewing a share link.
       const response = await fetch(`http://localhost:5000/api/share/${id}`);
       const data = await response.json();
       
@@ -234,6 +238,35 @@ function SharePage() {
                 </div>
               </div>
               
+                  {content.isOwner && (
+                    <div className="ml-2">
+                      <button
+                        onClick={async () => {
+                          const ok = confirm('Delete this share? This cannot be undone.');
+                          if (!ok) return;
+                          try {
+                            // Attempt delete using any token stored in localStorage (user must be authenticated for this to succeed)
+                            const stored = localStorage.getItem('lv_token');
+                            const res = await fetch(`http://localhost:5000/api/share/${id}`, {
+                              method: 'DELETE',
+                              headers: stored ? { Authorization: `Bearer ${stored}` } : {}
+                            });
+                            if (!res.ok) {
+                              const err = await res.json();
+                              throw new Error(err.error || 'Delete failed');
+                            }
+                            navigate('/');
+                          } catch (err) {
+                            alert(err.message || 'Delete failed');
+                          }
+                        }}
+                        className="bg-red-600 hover:bg-red-700 text-sm text-white px-3 py-2 rounded-lg"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+
               <div className="flex flex-wrap items-center gap-3">
                 {content.isProtected && (
                   <div className="flex items-center space-x-1 text-xs bg-purple-600/20 text-purple-400 px-3 py-1 rounded-full">
@@ -257,6 +290,13 @@ function SharePage() {
             </div>
           </div>
         </header>
+
+          <div className="mt-4 flex items-center justify-between">
+            <div className="text-sm text-gray-400">You are viewing as a guest.</div>
+            <div>
+              <a href="/" className="text-sm bg-gray-700 px-3 py-2 rounded-lg">Login / Register</a>
+            </div>
+          </div>
 
         {/* Content Area */}
         <div className="bg-gray-800/40 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-700">

@@ -1,9 +1,101 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { Upload, FileText, Link as LinkIcon, Clock, Shield, Download, Copy, Check, X, Key, Eye, Download as DownloadIcon } from 'lucide-react';
 import SharePage from './SharePage';
 
 function UploadPage() {
+  // Auth state (persisted in localStorage)
+  const storedToken = localStorage.getItem('lv_token');
+  const storedUser = JSON.parse(localStorage.getItem('lv_user') || 'null');
+  const [authToken, setAuthToken] = useState(storedToken || '');
+  const [user, setUser] = useState(storedUser || null);
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState('login'); // or 'register'
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+
+  const saveAuth = (token, user) => {
+    setAuthToken(token);
+    setUser(user);
+    localStorage.setItem('lv_token', token);
+    localStorage.setItem('lv_user', JSON.stringify(user));
+  };
+
+  const [showRecords, setShowRecords] = useState(false);
+  const [records, setRecords] = useState([]);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [recordsError, setRecordsError] = useState('');
+
+  const fetchRecords = async () => {
+    if (!authToken) return;
+    setRecordsLoading(true);
+    setRecordsError('');
+    try {
+      const res = await fetch('http://localhost:5000/api/user/shares', {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch records');
+      setRecords(data.shares || []);
+    } catch (err) {
+      setRecordsError(err.message || 'Failed to fetch records');
+    } finally {
+      setRecordsLoading(false);
+    }
+  };
+
+  const deleteShare = async (id) => {
+    if (!authToken) return;
+    try {
+      const res = await fetch(`http://localhost:5000/api/share/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Delete failed');
+      // refresh list
+      fetchRecords();
+    } catch (err) {
+      alert(err.message || 'Delete failed');
+    }
+  };
+
+  const logout = () => {
+    setAuthToken('');
+    setUser(null);
+    localStorage.removeItem('lv_token');
+    localStorage.removeItem('lv_user');
+    // Reset UI state and fully reload to ensure the app appears as a fresh session
+    handleReset();
+    window.location.reload();
+  };
+
+  const submitAuth = async () => {
+    setAuthError('');
+    // Basic client-side email format check
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(authEmail)) {
+      setAuthError('Invalid email format');
+      return;
+    }
+    try {
+      const url = `http://localhost:5000/api/auth/${authMode}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: authEmail, password: authPassword })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Auth failed');
+      saveAuth(data.token, data.user);
+      setShowAuth(false);
+      setAuthEmail('');
+      setAuthPassword('');
+    } catch (err) {
+      setAuthError(err.message || 'Auth failed');
+    }
+  };
   const [activeTab, setActiveTab] = useState('text');
   const [textContent, setTextContent] = useState('');
   const [file, setFile] = useState(null);
@@ -46,7 +138,7 @@ function UploadPage() {
       if (activeTab === 'text') {
         response = await fetch('http://localhost:5000/api/upload/text', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}) },
           body: JSON.stringify({ 
             content: textContent, 
             ...uploadData 
@@ -62,6 +154,7 @@ function UploadPage() {
         
         response = await fetch('http://localhost:5000/api/upload/file', {
           method: 'POST',
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
           body: formData
         });
       }
@@ -153,6 +246,82 @@ function UploadPage() {
           </div>
         </div>
       </header>
+
+      {/* Auth Bar */}
+      <div className="max-w-6xl mx-auto mb-6 flex justify-end items-center space-x-4">
+        {user ? (
+          <div className="flex items-center space-x-3 text-sm">
+            <div className="text-gray-300">Signed in as <strong className="text-white">{user.email}</strong></div>
+            <button onClick={() => { setShowRecords(true); fetchRecords(); }} className="text-sm bg-indigo-600 px-3 py-2 rounded-lg mr-2">My Records</button>
+            <button onClick={logout} className="text-sm bg-gray-800 px-3 py-2 rounded-lg">Logout</button>
+          </div>
+        ) : (
+          <div>
+            <button onClick={() => { setShowAuth(true); setAuthMode('login'); }} className="text-sm bg-indigo-600 px-3 py-2 rounded-lg mr-2">Login</button>
+            <button onClick={() => { setShowAuth(true); setAuthMode('register'); }} className="text-sm bg-gray-800 px-3 py-2 rounded-lg">Register</button>
+          </div>
+        )}
+      </div>
+
+      {/* Auth Modal */}
+      {showAuth && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-800 rounded-2xl p-6 w-full max-w-md border border-gray-700 relative z-50">
+            <h3 className="text-lg font-semibold mb-4 text-white">{authMode === 'login' ? 'Login' : 'Register'}</h3>
+            <div className="space-y-3">
+              <input value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="Email" className="w-full p-3 rounded bg-gray-900/60 border border-gray-700" />
+              <input value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Password" type="password" className="w-full p-3 rounded bg-gray-900/60 border border-gray-700" />
+              {authError && <div className="text-red-400 text-sm">{authError}</div>}
+              <div className="flex gap-2 mt-3">
+                <button onClick={submitAuth} className="flex-1 bg-indigo-600 py-2 rounded">{authMode === 'login' ? 'Login' : 'Register'}</button>
+                <button onClick={() => setShowAuth(false)} className="flex-1 bg-gray-700 py-2 rounded">Cancel</button>
+              </div>
+              <div className="text-sm text-gray-400 mt-2">
+                <button className="underline" onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}>{authMode === 'login' ? 'Need an account? Register' : 'Have an account? Login'}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Records Modal */}
+      {showRecords && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-800 rounded-2xl p-6 w-full max-w-3xl border border-gray-700 relative z-50 max-h-[80vh] overflow-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-white">My Records</h3>
+              <div>
+                <button onClick={() => setShowRecords(false)} className="bg-gray-700 px-3 py-1 rounded">Close</button>
+              </div>
+            </div>
+
+            {recordsLoading ? (
+              <div>Loading...</div>
+            ) : recordsError ? (
+              <div className="text-red-400">{recordsError}</div>
+            ) : records.length === 0 ? (
+              <div className="text-gray-300">No active uploads found.</div>
+            ) : (
+              <div className="space-y-4">
+                {records.map(r => (
+                  <div key={r.id} className="p-4 bg-gray-900/50 rounded-lg border border-gray-800 flex justify-between items-start">
+                    <div>
+                      <div className="text-sm text-gray-400">{r.type.toUpperCase()} • Uploaded: {new Date(r.createdAt).toLocaleString()}</div>
+                      <div className="text-white font-mono mt-1">{r.fileName || r.id}</div>
+                      <div className="text-xs text-gray-400">Expires: {r.expiresAt ? new Date(r.expiresAt).toLocaleString() : 'Never'}</div>
+                      <a href={r.link} target="_blank" rel="noreferrer" className="text-indigo-400 text-sm underline mt-2 inline-block">Open Link</a>
+                    </div>
+                    <div className="flex flex-col items-end space-y-2">
+                      <div className="text-sm text-gray-400">{r.isProtected ? 'Protected' : 'Public'}</div>
+                      <button onClick={() => { if (confirm('Delete this share?')) deleteShare(r.id); }} className="bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded">Delete</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <main className="max-w-4xl mx-auto">
         {/* Upload Section */}

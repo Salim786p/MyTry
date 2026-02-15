@@ -8,7 +8,11 @@ const multer = require('multer');
 const cloudinary = require('./cloudinary');
 const fs = require('fs');
 const path = require('path');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
+
+const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret_in_prod';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -40,6 +44,7 @@ db.exec(`
     max_downloads INTEGER,
     current_downloads INTEGER DEFAULT 0,
     password TEXT
+    , owner_id TEXT
   )
 `);
 
@@ -81,6 +86,20 @@ cron.schedule('0 * * * *', async () => {
 
 console.log('⏰ Auto-cleanup scheduled (runs every hour)');
 
+// Ensure `owner_id` column exists (for older DBs)
+(() => {
+  try {
+    const cols = db.prepare("PRAGMA table_info('shares')").all();
+    const hasOwner = cols.some(c => c.name === 'owner_id');
+    if (!hasOwner) {
+      db.exec('ALTER TABLE shares ADD COLUMN owner_id TEXT');
+      console.log('🔧 Added owner_id column to shares table');
+    }
+  } catch (err) {
+    console.error('Failed to ensure owner_id column:', err.message);
+  }
+})();
+
 // File upload setup (temporary storage for Cloudinary)
 const upload = multer({ 
   dest: 'uploads/',
@@ -113,6 +132,31 @@ const generateId = () => {
   return id;
 };
 
+// --- Authentication helpers ---
+const generateToken = (user) => {
+  return jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+};
+
+const authenticateToken = (req, res, next) => {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return next(); // allow anonymous for public endpoints
+
+  const token = auth.split(' ')[1];
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = { id: payload.id, email: payload.email };
+  } catch (err) {
+    // invalid token - ignore and continue as anonymous
+    console.warn('Invalid token provided');
+  }
+  next();
+};
+
+const requireAuth = (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  next();
+};
+
 // 1. Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
@@ -123,25 +167,124 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// --- User auth ---
+// Create users table if not exists
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE,
+    password TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    // Basic email format validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) return res.status(400).json({ error: 'Invalid email format' });
+
+    // Check if user exists
+    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    if (existing) return res.status(400).json({ error: 'Email already registered' });
+
+    const hashed = await bcrypt.hash(password, 10);
+    const userId = nanoid(10);
+    const stmt = db.prepare('INSERT INTO users (id, email, password) VALUES (?, ?, ?)');
+    stmt.run(userId, email, hashed);
+
+    const token = generateToken({ id: userId, email });
+    res.json({ success: true, token, user: { id: userId, email } });
+  } catch (err) {
+    console.error('Register error:', err.message);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) return res.status(400).json({ error: 'Invalid email format' });
+
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const token = generateToken({ id: user.id, email: user.email });
+    res.json({ success: true, token, user: { id: user.id, email: user.email } });
+  } catch (err) {
+    console.error('Login error:', err.message);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// 7. List current user's shares (records)
+app.get('/api/user/shares', authenticateToken, requireAuth, async (req, res) => {
+  try {
+    const ownerId = req.user.id;
+    const now = new Date().toISOString();
+
+    // Get all shares for the user
+    const stmt = db.prepare('SELECT * FROM shares WHERE owner_id = ? ORDER BY created_at DESC');
+    const rows = stmt.all(ownerId);
+
+    const activeShares = [];
+
+    for (const share of rows) {
+      // If expired, clean up (delete cloudinary and DB row)
+      if (share.expires_at && new Date(share.expires_at) <= new Date()) {
+        if (share.cloudinary_public_id) {
+          try { await cloudinary.uploader.destroy(share.cloudinary_public_id); } catch (e) { console.error('Cleanup delete error:', e.message); }
+        }
+        db.prepare('DELETE FROM shares WHERE id = ?').run(share.id);
+        continue; // skip expired
+      }
+
+      activeShares.push({
+        id: share.id,
+        type: share.type,
+        createdAt: share.created_at,
+        expiresAt: share.expires_at,
+        isProtected: !!share.password,
+        fileName: share.original_name || null,
+        fileSize: share.file_size || null,
+        link: `http://localhost:5173/share/${share.id}`
+      });
+    }
+
+    res.json({ success: true, shares: activeShares });
+  } catch (err) {
+    console.error('User shares error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch user shares' });
+  }
+});
+
 // 2. Upload text
-app.post('/api/upload/text', validateUpload, async (req, res) => {
+app.post('/api/upload/text', authenticateToken, validateUpload, async (req, res) => {
   try {
     const { content, expiry = '10m', maxViews, password } = req.body;
-    
+
     if (!content || !content.trim()) {
       return res.status(400).json({ error: 'Text content is required' });
     }
 
     const id = generateId();
     const expiresAt = getExpiryDate(expiry);
-    
+
     const stmt = db.prepare(`
-      INSERT INTO shares (id, type, content, expires_at, max_views, current_views, password)
-      VALUES (?, ?, ?, ?, ?, 0, ?)
+      INSERT INTO shares (id, type, content, expires_at, max_views, current_views, password, owner_id)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?)
     `);
 
-    stmt.run(id, 'text', content.trim(), expiresAt.toISOString(), maxViews || null, password || null);
-    
+    const ownerId = req.user ? req.user.id : null;
+    stmt.run(id, 'text', content.trim(), expiresAt.toISOString(), maxViews || null, password || null, ownerId);
+
     res.json({
       success: true,
       id,
@@ -150,7 +293,7 @@ app.post('/api/upload/text', validateUpload, async (req, res) => {
       type: 'text',
       isProtected: !!password
     });
-    
+
   } catch (error) {
     console.error('Text upload error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -158,7 +301,7 @@ app.post('/api/upload/text', validateUpload, async (req, res) => {
 });
 
 // 3. Upload file to Cloudinary
-app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, res) => {
+app.post('/api/upload/file', authenticateToken, upload.single('file'), validateUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'File is required' });
@@ -191,11 +334,13 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
     // Remove temp file
     fs.unlinkSync(req.file.path);
     
-    // Store in SQLite
+    // Store in SQLite (include owner_id)
     const stmt = db.prepare(`
-      INSERT INTO shares (id, type, cloudinary_url, cloudinary_public_id, original_name, file_size, expires_at, max_views, max_downloads, current_views, current_downloads, password)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
+      INSERT INTO shares (id, type, cloudinary_url, cloudinary_public_id, original_name, file_size, expires_at, max_views, max_downloads, current_views, current_downloads, password, owner_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
     `);
+
+    const ownerId = req.user ? req.user.id : null;
 
     stmt.run(
       id,
@@ -207,7 +352,8 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
       expiresAt.toISOString(),
       maxViews || null,
       maxDownloads || null,
-      password || null
+      password || null,
+      ownerId
     );
     
     res.json({
@@ -260,7 +406,7 @@ app.post('/api/share/:id/verify', validateShareId, async (req, res) => {
 });
 
 // 5. Get content by ID
-app.get('/api/share/:id', validateShareId, async (req, res) => { 
+app.get('/api/share/:id', authenticateToken, validateShareId, async (req, res) => { 
   try {
     const { id } = req.params;
     
@@ -299,13 +445,20 @@ app.get('/api/share/:id', validateShareId, async (req, res) => {
       return res.status(410).json({ error: 'Link has expired' });
     }
     
+    // Determine owner flag
+    let isOwner = false;
+    if (req.user && share && share.owner_id && req.user.id === share.owner_id) {
+      isOwner = true;
+    }
+
     // Return data based on type
     const response = {
       id: share.id,
       type: share.type,
       createdAt: share.created_at,
       expiresAt: share.expires_at,
-      isProtected: !!share.password
+      isProtected: !!share.password,
+      isOwner
     };
     
     if (share.type === 'text') {
@@ -432,5 +585,32 @@ app.listen(PORT, () => {
   // Create uploads directory if not exists
   if (!fs.existsSync('uploads')) {
     fs.mkdirSync('uploads');
+  }
+});
+
+// Delete a share (owner only)
+app.delete('/api/share/:id', authenticateToken, requireAuth, validateShareId, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const share = db.prepare('SELECT * FROM shares WHERE id = ?').get(id);
+    if (!share) return res.status(404).json({ error: 'Not found' });
+
+    if (!share.owner_id || share.owner_id !== req.user.id) {
+      return res.status(403).json({ error: 'Only the uploader can delete this share' });
+    }
+
+    if (share.cloudinary_public_id) {
+      try {
+        await cloudinary.uploader.destroy(share.cloudinary_public_id);
+      } catch (err) {
+        console.error('Cloudinary delete error:', err.message);
+      }
+    }
+
+    db.prepare('DELETE FROM shares WHERE id = ?').run(id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    console.error('Delete share error:', err.message);
+    res.status(500).json({ error: 'Delete failed' });
   }
 });
