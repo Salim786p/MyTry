@@ -1,11 +1,10 @@
 import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import { Upload, FileText, Link as LinkIcon, Clock, Shield, Download, Copy, Check, X } from 'lucide-react';
-import SharePage from './SharePage'; // Import the new component
+import { Upload, FileText, Link as LinkIcon, Clock, Shield, Download, Copy, Check, X, Key, Eye, Download as DownloadIcon } from 'lucide-react';
+import SharePage from './SharePage';
 
-// This is your existing upload UI - moved to a separate component
 function UploadPage() {
-  const [activeTab, setActiveTab] = useState('text'); // 'text' or 'file'
+  const [activeTab, setActiveTab] = useState('text');
   const [textContent, setTextContent] = useState('');
   const [file, setFile] = useState(null);
   const [expiry, setExpiry] = useState('10m');
@@ -13,8 +12,12 @@ function UploadPage() {
   const [copied, setCopied] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  
+  // New state for additional features
+  const [password, setPassword] = useState('');
+  const [maxViews, setMaxViews] = useState('');
+  const [maxDownloads, setMaxDownloads] = useState('');
 
-  // PASTE YOUR ENTIRE EXISTING handleUpload FUNCTION HERE
   const handleUpload = async (e) => {
     e.preventDefault();
     setIsUploading(true);
@@ -34,17 +37,28 @@ function UploadPage() {
     
     try {
       let response;
+      const uploadData = {
+        expiry,
+        ...(password && { password }),
+        ...(maxViews && { maxViews: parseInt(maxViews) })
+      };
       
       if (activeTab === 'text') {
         response = await fetch('http://localhost:5000/api/upload/text', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: textContent, expiry: expiry })
+          body: JSON.stringify({ 
+            content: textContent, 
+            ...uploadData 
+          })
         });
       } else {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('expiry', expiry);
+        if (password) formData.append('password', password);
+        if (maxViews) formData.append('maxViews', maxViews);
+        if (maxDownloads) formData.append('maxDownloads', maxDownloads);
         
         response = await fetch('http://localhost:5000/api/upload/file', {
           method: 'POST',
@@ -60,11 +74,15 @@ function UploadPage() {
       
       setGeneratedLink(data.link);
       
+      // Reset form
       if (activeTab === 'text') {
         setTextContent('');
       } else {
         setFile(null);
       }
+      setPassword('');
+      setMaxViews('');
+      setMaxDownloads('');
       
     } catch (error) {
       setUploadError(error.message || 'Upload failed. Check if backend is running.');
@@ -95,10 +113,12 @@ function UploadPage() {
     setGeneratedLink('');
     setTextContent('');
     setFile(null);
+    setPassword('');
+    setMaxViews('');
+    setMaxDownloads('');
     setUploadError('');
   };
 
-  // PASTE YOUR ENTIRE EXISTING RETURN/JSX HERE (from the original App.jsx)
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 to-black text-gray-100 p-4 md:p-8">
       {/* Header */}
@@ -211,6 +231,72 @@ function UploadPage() {
                   </div>
                 )}
 
+                {/* Advanced Options - Password and Limits */}
+                <div className="mt-8 space-y-4">
+                  {/* Password Protection */}
+                  <div className="bg-gray-900/50 rounded-xl p-5 border border-gray-800">
+                    <div className="flex items-center space-x-2 mb-4">
+                      <Key className="h-5 w-5 text-purple-400" />
+                      <span className="font-medium text-gray-300">Password Protection (Optional)</span>
+                    </div>
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Set a password to protect this link"
+                      className="w-full bg-gray-800/70 border border-gray-700 rounded-lg p-3 text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-2">
+                      Recipients will need this password to access the content
+                    </p>
+                  </div>
+
+                  {/* View/Download Limits */}
+                  <div className="bg-gray-900/50 rounded-xl p-5 border border-gray-800">
+                    <div className="flex items-center space-x-2 mb-4">
+                      <Eye className="h-5 w-5 text-blue-400" />
+                      <span className="font-medium text-gray-300">Access Limits (Optional)</span>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Max Views - for both text and file */}
+                      <div>
+                        <label className="block text-sm text-gray-400 mb-2">
+                          Maximum Views
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={maxViews}
+                          onChange={(e) => setMaxViews(e.target.value)}
+                          placeholder="e.g., 5"
+                          className="w-full bg-gray-800/70 border border-gray-700 rounded-lg p-3 text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+
+                      {/* Max Downloads - only for files */}
+                      {activeTab === 'file' && (
+                        <div>
+                          <label className="block text-sm text-gray-400 mb-2">
+                            Maximum Downloads
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={maxDownloads}
+                            onChange={(e) => setMaxDownloads(e.target.value)}
+                            placeholder="e.g., 3"
+                            className="w-full bg-gray-800/70 border border-gray-700 rounded-lg p-3 text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">
+                      Leave empty for unlimited access
+                    </p>
+                  </div>
+                </div>
+
                 {/* Expiry Settings */}
                 <div className="mt-8 p-5 bg-gray-900/50 rounded-xl border border-gray-800">
                   <div className="flex items-center justify-between mb-4">
@@ -292,6 +378,12 @@ function UploadPage() {
               </div>
               <h2 className="text-2xl font-bold mb-2">Upload Successful!</h2>
               <p className="text-gray-400">Share this link with anyone you want to access your content</p>
+              {password && (
+                <div className="mt-2 inline-flex items-center space-x-1 bg-purple-600/20 text-purple-400 px-3 py-1 rounded-full text-sm">
+                  <Key className="h-3 w-3" />
+                  <span>Password Protected</span>
+                </div>
+              )}
             </div>
 
             <div className="space-y-6">
@@ -336,7 +428,11 @@ function UploadPage() {
                     <Clock className="h-5 w-5 text-yellow-400" />
                     <span className="text-sm font-medium text-gray-300">Expires in</span>
                   </div>
-                  <p className="text-lg font-semibold">10 minutes</p>
+                  <p className="text-lg font-semibold">
+                    {expiry === '10m' ? '10 minutes' : 
+                     expiry === '1h' ? '1 hour' : 
+                     expiry === '1d' ? '1 day' : '1 week'}
+                  </p>
                 </div>
                 <div className="bg-gray-900/50 p-4 rounded-xl border border-gray-800">
                   <div className="flex items-center space-x-3 mb-2">
@@ -350,7 +446,7 @@ function UploadPage() {
                     {activeTab === 'text' ? (
                       <FileText className="h-5 w-5 text-blue-400" />
                     ) : (
-                      <Download className="h-5 w-5 text-blue-400" />
+                      <DownloadIcon className="h-5 w-5 text-blue-400" />
                     )}
                     <span className="text-sm font-medium text-gray-300">Content Type</span>
                   </div>
@@ -428,7 +524,6 @@ function UploadPage() {
   );
 }
 
-// Main App Component with Router
 function App() {
   return (
     <Router>

@@ -1,5 +1,5 @@
-// Add this line with other requires
-const { validateUpload, validateShareId, DANGEROUS_EXTENSIONS } = require('./validation');
+const cron = require('node-cron');
+const { validateUpload, validateShareId } = require('./validation');
 const express = require('express');
 const cors = require('cors');
 const Database = require('better-sqlite3');
@@ -23,7 +23,7 @@ app.use(express.json());
 // SQLite Database
 const db = new Database('linkvault.db');
 
-// Create tables
+// Create tables with all columns
 db.exec(`
   CREATE TABLE IF NOT EXISTS shares (
     id TEXT PRIMARY KEY,
@@ -34,9 +34,52 @@ db.exec(`
     original_name TEXT,
     file_size INTEGER,
     expires_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    max_views INTEGER,
+    current_views INTEGER DEFAULT 0,
+    max_downloads INTEGER,
+    current_downloads INTEGER DEFAULT 0,
+    password TEXT
   )
 `);
+
+console.log('✅ Database initialized with all columns');
+
+// Auto cleanup job - runs every hour
+cron.schedule('0 * * * *', async () => {
+  console.log('🔄 Running automatic cleanup of expired content...');
+  
+  try {
+    const now = new Date().toISOString();
+    
+    // Get expired files
+    const expiredFiles = db.prepare(`
+      SELECT * FROM shares 
+      WHERE expires_at < ? AND type = 'file' AND cloudinary_public_id IS NOT NULL
+    `).all(now);
+    
+    // Delete from Cloudinary
+    for (const file of expiredFiles) {
+      try {
+        await cloudinary.uploader.destroy(file.cloudinary_public_id);
+        console.log(`🗑️ Deleted from Cloudinary: ${file.cloudinary_public_id}`);
+      } catch (err) {
+        console.error(`Failed to delete ${file.cloudinary_public_id}:`, err.message);
+      }
+    }
+    
+    // Delete all expired from database
+    const result = db.prepare('DELETE FROM shares WHERE expires_at < ?').run(now);
+    
+    if (result.changes > 0) {
+      console.log(`✅ Auto-cleanup: ${result.changes} expired items removed`);
+    }
+  } catch (error) {
+    console.error('❌ Auto-cleanup error:', error);
+  }
+});
+
+console.log('⏰ Auto-cleanup scheduled (runs every hour)');
 
 // File upload setup (temporary storage for Cloudinary)
 const upload = multer({ 
@@ -83,7 +126,7 @@ app.get('/api/health', (req, res) => {
 // 2. Upload text
 app.post('/api/upload/text', validateUpload, async (req, res) => {
   try {
-    const { content, expiry = '10m' } = req.body;
+    const { content, expiry = '10m', maxViews, password } = req.body;
     
     if (!content || !content.trim()) {
       return res.status(400).json({ error: 'Text content is required' });
@@ -93,18 +136,19 @@ app.post('/api/upload/text', validateUpload, async (req, res) => {
     const expiresAt = getExpiryDate(expiry);
     
     const stmt = db.prepare(`
-      INSERT INTO shares (id, type, content, expires_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO shares (id, type, content, expires_at, max_views, current_views, password)
+      VALUES (?, ?, ?, ?, ?, 0, ?)
     `);
-    
-    stmt.run(id, 'text', content.trim(), expiresAt.toISOString());
+
+    stmt.run(id, 'text', content.trim(), expiresAt.toISOString(), maxViews || null, password || null);
     
     res.json({
       success: true,
       id,
       link: `http://localhost:5173/share/${id}`,
       expiresAt,
-      type: 'text'
+      type: 'text',
+      isProtected: !!password
     });
     
   } catch (error) {
@@ -120,7 +164,7 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
       return res.status(400).json({ error: 'File is required' });
     }
     
-    const { expiry = '10m' } = req.body;
+    const { expiry = '10m', maxViews, maxDownloads, password } = req.body;
     const id = generateId();
     const expiresAt = getExpiryDate(expiry);
     
@@ -149,18 +193,21 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
     
     // Store in SQLite
     const stmt = db.prepare(`
-      INSERT INTO shares (id, type, cloudinary_url, cloudinary_public_id, original_name, file_size, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO shares (id, type, cloudinary_url, cloudinary_public_id, original_name, file_size, expires_at, max_views, max_downloads, current_views, current_downloads, password)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
     `);
-    
+
     stmt.run(
       id,
       'file',
-      fileUrl,  // ← Corrected URL
+      fileUrl,
       result.public_id,
       req.file.originalname,
       req.file.size,
-      expiresAt.toISOString()
+      expiresAt.toISOString(),
+      maxViews || null,
+      maxDownloads || null,
+      password || null
     );
     
     res.json({
@@ -171,7 +218,8 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
       type: 'file',
       fileName: req.file.originalname,
       fileSize: req.file.size,
-      cloudinaryUrl: fileUrl  // ← Return corrected URL
+      cloudinaryUrl: fileUrl,
+      isProtected: !!password
     });
     
   } catch (error) {
@@ -184,18 +232,61 @@ app.post('/api/upload/file', upload.single('file'), validateUpload, async (req, 
   }
 });
 
-// 4. Get content by ID
+// 4. Verify password for protected links
+app.post('/api/share/:id/verify', validateShareId, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+    
+    const share = db.prepare('SELECT password FROM shares WHERE id = ?').get(id);
+    
+    if (!share) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    if (!share.password) {
+      return res.json({ protected: false });
+    }
+    
+    if (password === share.password) {
+      return res.json({ protected: true, verified: true });
+    } else {
+      return res.status(401).json({ protected: true, verified: false });
+    }
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+// 5. Get content by ID
 app.get('/api/share/:id', validateShareId, async (req, res) => { 
   try {
     const { id } = req.params;
     
     const stmt = db.prepare('SELECT * FROM shares WHERE id = ?');
     const share = stmt.get(id);
-
+    
     if (!share) {
-    return res.status(403).json({ error: 'Access denied' }); 
+      return res.status(403).json({ error: 'Access denied' }); 
     }
     
+    // Check view limit
+    if (share.max_views !== null) {
+      const currentViews = share.current_views || 0;
+      if (currentViews >= share.max_views) {
+        // Delete content
+        if (share.cloudinary_public_id) {
+          await cloudinary.uploader.destroy(share.cloudinary_public_id);
+        }
+        db.prepare('DELETE FROM shares WHERE id = ?').run(id);
+        return res.status(410).json({ error: 'View limit exceeded' });
+      }
+      
+      // Increment view count
+      db.prepare('UPDATE shares SET current_views = current_views + 1 WHERE id = ?').run(id);
+    }
+
     // Check expiry
     if (new Date() > new Date(share.expires_at)) {
       // Delete from Cloudinary if it's a file
@@ -213,7 +304,8 @@ app.get('/api/share/:id', validateShareId, async (req, res) => {
       id: share.id,
       type: share.type,
       createdAt: share.created_at,
-      expiresAt: share.expires_at
+      expiresAt: share.expires_at,
+      isProtected: !!share.password
     };
     
     if (share.type === 'text') {
@@ -222,7 +314,7 @@ app.get('/api/share/:id', validateShareId, async (req, res) => {
       response.fileName = share.original_name;
       response.fileSize = share.file_size;
       response.downloadUrl = share.cloudinary_url;
-      response.directLink = `/api/download/${id}`;
+      response.directLink = `http://localhost:5000/api/download/${id}`;
     }
     
     res.json(response);
@@ -233,19 +325,27 @@ app.get('/api/share/:id', validateShareId, async (req, res) => {
   }
 });
 
-// 5. Download file with proper headers
+// 6. Download file with proper headers
 app.get('/api/download/:id', validateShareId, async (req, res) => {
   try {
     const { id } = req.params;
     
     const stmt = db.prepare(`
-      SELECT cloudinary_url, expires_at, type, original_name 
+      SELECT cloudinary_url, expires_at, type, original_name, max_downloads, current_downloads 
       FROM shares WHERE id = ?
     `);
     const share = stmt.get(id);
 
     if (!share || share.type !== 'file') {
       return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Check download limit
+    if (share.max_downloads !== null) {
+      const currentDownloads = share.current_downloads || 0;
+      if (currentDownloads >= share.max_downloads) {
+        return res.status(410).json({ error: 'Download limit exceeded' });
+      }
     }
     
     // Check expiry
@@ -263,6 +363,9 @@ app.get('/api/download/:id', validateShareId, async (req, res) => {
     // Get file buffer
     const buffer = Buffer.from(await response.arrayBuffer());
     
+    // Increment download count
+    db.prepare('UPDATE shares SET current_downloads = current_downloads + 1 WHERE id = ?').run(id);
+    
     // Set proper headers for download
     res.setHeader('Content-Disposition', `attachment; filename="${share.original_name}"`);
     res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
@@ -277,7 +380,8 @@ app.get('/api/download/:id', validateShareId, async (req, res) => {
   }
 });
 
-// 6. Cleanup expired entries (cron job alternative)
+
+// 8. Cleanup endpoint (manual trigger)
 app.get('/api/cleanup', async (req, res) => {
   try {
     const now = new Date().toISOString();
@@ -321,6 +425,9 @@ app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
   console.log(`📁 Database: linkvault.db`);
   console.log(`☁️  Storage: Cloudinary`);
+  console.log(`🔒 Password protection: Enabled`);
+  console.log(`👁️ View/Download limits: Enabled`);
+  console.log(`🗑️ Manual delete: Enabled`);
   
   // Create uploads directory if not exists
   if (!fs.existsSync('uploads')) {
